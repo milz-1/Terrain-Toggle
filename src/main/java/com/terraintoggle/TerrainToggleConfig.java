@@ -27,6 +27,7 @@ package com.terraintoggle;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
+import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Keybind;
 
 @ConfigGroup(TerrainToggleConfig.GROUP)
@@ -34,25 +35,102 @@ public interface TerrainToggleConfig extends Config
 {
     String GROUP = "terraintoggle";
 
+    // -------------------------
+    // MAIN SETTINGS
+    // -------------------------
+
     @ConfigItem(
             keyName = "enableTerrain",
-            name = "Show Terrain",
+            name = "Display Terrain",
             description = "Enable or disable terrain visibility.",
             position = 1
     )
-    default boolean enableTerrain()
-    {
-        return true;
-    }
+    default boolean enableTerrain() { return true; }
+
+    @ConfigItem(
+            keyName = "enableHotkey",
+            name = "Enable Hotkey",
+            description = "Allow the hotkey to toggle terrain on/off. (Controls Display Terrain Toggle)",
+            position = 2
+    )
+    default boolean enableHotkey() { return false; }
 
     @ConfigItem(
             keyName = "toggleTerrainHotkey",
-            name = "Toggle Terrain Hotkey",
-            description = "Press this key to toggle terrain visibility on or off. (Will consume key)",
-            position = 2
+            name = "Terrain Toggle Hotkey",
+            description = "Hotkey used to toggle terrain visibility on/off if hotkey is enabled.",
+            position = 3
     )
-    default Keybind toggleTerrainHotkey()
+    default Keybind toggleTerrainHotkey() { return Keybind.NOT_SET; }
+
+    @ConfigItem(
+            keyName = "enableRegionToggle",
+            name = "Enable Region Auto-Toggle",
+            description = "Automatically apply terrain rules based on selected regions.",
+            position = 4
+    )
+    default boolean enableRegionToggle() { return false; }
+
+    @ConfigItem(
+            keyName = "enableRightClickRegion",
+            name = "Enable Region Right-Click Menu",
+            description = "Allows Shift-Right-Click to add/remove regions.",
+            position = 5
+    )
+    default boolean enableRightClickRegion() { return false; }
+
+    @ConfigItem(
+            keyName = "notificationMode",
+            name = "Notification Mode",
+            description = "Choose how terrain toggle status is shown",
+            position = 6
+    )
+    default NotificationMode notificationMode() { return NotificationMode.None; }
+
+    // -----------------------------------------------------
+    // REGION DATA / DEBUG SUBMENU
+    // -----------------------------------------------------
+
+    @ConfigSection(
+            name = "Region Data / Debug",
+            description = "Shows region IDs, lists, and region-related debug info.",
+            position = 99,
+            closedByDefault = true
+    )
+    String regionDataSection = "regionDataSection";
+
+    @ConfigItem(
+            keyName = "showRegions",
+            name = "Show Regions",
+            description = "Comma-separated list of region IDs where terrain will always be shown.",
+            position = 100,
+            section = regionDataSection
+    )
+    default String showRegions() { return ""; }
+
+    @ConfigItem(
+            keyName = "hideRegions",
+            name = "Hide Regions",
+            description = "Comma-separated list of region IDs where terrain will always be hidden.",
+            position = 101,
+            section = regionDataSection
+    )
+    default String hideRegions() { return ""; }
+
+    @ConfigItem(
+            keyName = "showRegionInOverlay",
+            name = "Show Region in Overlay",
+            description = "If enabled, the current region ID will always display in the overlay (if enabled).",
+            position = 102,
+            section = regionDataSection
+    )
+    default boolean showRegionInOverlay() { return false; }
+
+    enum NotificationMode
     {
-        return Keybind.NOT_SET;
+        None,
+        Text,
+        Overlay,
+        Both
     }
 }

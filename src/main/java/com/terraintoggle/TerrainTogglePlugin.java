@@ -18,158 +18,509 @@
  * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
  * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
  * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 package com.terraintoggle;
 
+
 import com.google.inject.Provides;
-import java.awt.event.KeyEvent;
-import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
-import net.runelite.api.hooks.DrawCallbacks;
+import net.runelite.api.ChatMessageType;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.MenuEntryAdded;
+import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.api.MenuAction;
+import net.runelite.api.MenuEntry;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.callback.RenderCallback;
+import net.runelite.client.callback.RenderCallbackManager;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
-import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.input.KeyListener;
 import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.ui.overlay.components.TitleComponent;
+
+import javax.inject.Inject;
+import java.awt.event.KeyEvent;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.Arrays;
 
 @Slf4j
 @PluginDescriptor(
         name = "Terrain Toggle",
-        description = "Toggle terrain visibility on or off, requires 117 HD / GPU",
-        tags = {"terrain", "toggle", "floor", "ground", "remover", "blind", "accessibility"}
+        description = "Toggle terrain visibility (requires GPU)",
+        tags = {"terrain", "toggle", "ground", "gpu"}
 )
-public class TerrainTogglePlugin extends Plugin implements DrawCallbacks, KeyListener
-{
-    @Inject private Client client;
-    @Inject private ClientThread clientThread;
-    @Inject private TerrainToggleConfig config;
-    @Inject private ConfigManager configManager;
-    @Inject private KeyManager keyManager;
+public class TerrainTogglePlugin extends Plugin implements KeyListener {
 
-    private DrawCallbacks interceptedDrawCallbacks;
+    @javax.inject.Inject private Client client;
+    @javax.inject.Inject private ClientThread clientThread;
+    @javax.inject.Inject private TerrainToggleConfig config;
+    @javax.inject.Inject private ConfigManager configManager;
+    @javax.inject.Inject private KeyManager keyManager;
+    @javax.inject.Inject private OverlayManager overlayManager;
+    @javax.inject.Inject private TerrainToggleOverlay overlay;
+    @javax.inject.Inject private RenderCallbackManager renderCallbackManager;
+
     private boolean terrainVisible = true;
     private boolean consumeKeys = false;
+    private final Set<Integer> showRegions = new HashSet<>();
+    private final Set<Integer> hideRegions = new HashSet<>();
+    private int lastRegion = -1;
+    private final Set<Integer> regions = new HashSet<>();
+
+    private final RenderCallback TERRAIN_FILTER = new RenderCallback() {
+        @Override
+        public boolean drawTile(Scene scene, Tile tile) {
+            return terrainVisible;
+        }
+
+        @Override
+        public boolean drawObject(Scene scene, TileObject object) {
+            return true;
+        }
+    };
 
     @Provides
-    TerrainToggleConfig provideConfig(ConfigManager configManager)
-    {
+    TerrainToggleConfig provideConfig(ConfigManager configManager) {
         return configManager.getConfig(TerrainToggleConfig.class);
     }
 
+    // ===== Plugin startup =====
     @Override
-    protected void startUp()
-    {
+    protected void startUp() {
         log.info("TerrainToggle started");
-        keyManager.registerKeyListener(this);
+
         terrainVisible = config.enableTerrain();
-        clientThread.invoke(this::interceptDrawCallbacks);
+        keyManager.registerKeyListener(this);
+
+        // Register overlay
+        overlayManager.add(overlay);
+
+        clientThread.invoke(() -> {
+            renderCallbackManager.register(TERRAIN_FILTER);
+            if (client.getGameState() == GameState.LOGGED_IN)
+                client.setGameState(GameState.LOADING);
+        });
+
+        // Load regions dynamically
+        updateRegionLists();  // Dynamically load the region lists on plugin start
     }
 
+
+
+    // ===== Plugin shutdown =====
     @Override
-    protected void shutDown()
-    {
+    protected void shutDown() {
         log.info("TerrainToggle stopped");
+
         keyManager.unregisterKeyListener(this);
+        overlayManager.remove(overlay);
+
         clientThread.invoke(() -> {
-            if (client.getDrawCallbacks() == this && interceptedDrawCallbacks != null)
-                client.setDrawCallbacks(interceptedDrawCallbacks);
-            interceptedDrawCallbacks = null;
+            renderCallbackManager.unregister(TERRAIN_FILTER);
+            if (client.getGameState() == GameState.LOGGED_IN)
+                client.setGameState(GameState.LOADING);
         });
     }
 
-    private boolean interceptDrawCallbacks()
-    {
-        if (!client.isGpu())
-        {
-            log.warn("GPU plugin must be enabled for TerrainToggle to work");
-            return false;
-        }
 
-        DrawCallbacks current = client.getDrawCallbacks();
-        if (current == null || current == this)
-            return false;
-
-        interceptedDrawCallbacks = current;
-        client.setDrawCallbacks(this);
-        log.info("DrawCallbacks intercepted");
-        return true;
-    }
 
     @Subscribe
-    public void onConfigChanged(ConfigChanged event)
-    {
-        if (event.getGroup().equals(TerrainToggleConfig.GROUP))
-        {
-            terrainVisible = config.enableTerrain();
-            log.info("Terrain visibility changed via config: {}", terrainVisible);
+    public void onGameTick(GameTick tick) {
+        if (client.getLocalPlayer() == null)
+            return;
+
+        int region = client.getLocalPlayer().getWorldLocation().getRegionID();
+        boolean newTerrainVisible = terrainVisible;  // Assume terrain visibility remains the same
+        String changeReason = "";  // Initialize with an empty reason
+
+        // Only apply region logic if region toggle is enabled
+        if (config.enableRegionToggle()) {
+            // Check if the player is in a show region
+            if (showRegions.contains(region)) {
+                newTerrainVisible = true;  // Show terrain if in a show region
+                if (lastRegion != region) {
+                    changeReason = "Region entered";  // Simple change reason when entering a show region
+                    lastRegion = region;
+                }
+            }
+            // Check if the player is in a hide region
+            else if (hideRegions.contains(region)) {
+                newTerrainVisible = false;  // Hide terrain if in a hide region
+                if (lastRegion != region) {
+                    changeReason = "Region entered";  // Simple change reason when entering a hide region
+                    lastRegion = region;
+                }
+            }
+            else {
+                // Not in any region list, fallback to master toggle behavior
+                newTerrainVisible = config.enableTerrain();  // Use master toggle
+                if (lastRegion != -1) {
+                    changeReason = "Region left";  // Only trigger when leaving a region
+                    lastRegion = -1;
+                }
+            }
+        }
+        // If region toggle is not enabled, fall back to master toggle (ignore region-based behavior)
+        else {
+            newTerrainVisible = config.enableTerrain();  // Master toggle controls terrain visibility
+        }
+
+        // Only trigger a reload if terrain visibility has actually changed
+        if (terrainVisible != newTerrainVisible) {
+            terrainVisible = newTerrainVisible;
+            client.setGameState(GameState.LOADING);  // Trigger a game state change to reflect the terrain change
+
+            // **Text notification**
+            TerrainToggleConfig.NotificationMode mode = config.notificationMode();
+
+            // If no region or hotkey change reason is provided, set it to "Manual" (for manual toggle)
+            if (changeReason.isEmpty()) {
+                // If lastChangeReason is set (i.e., hotkey or region), use that
+                if (!lastChangeReason.isEmpty()) {
+                    changeReason = lastChangeReason;  // Override with hotkey or region
+                    lastChangeReason = "";  // Reset the reason after using it
+                } else {
+                    changeReason = "Manual";  // Default to "Manual" if it's neither region nor hotkey
+                }
+            }
+
+            // **Text notification** - show chat message based on terrain visibility and change reason
+            if (mode == TerrainToggleConfig.NotificationMode.Text || mode == TerrainToggleConfig.NotificationMode.Both) {
+                String message = terrainVisible
+                        ? "<col=00FFFF>[Terrain Toggle]</col> <col=00ff00>VISIBLE</col> (" + changeReason + ")"
+                        : "<col=00FFFF>[Terrain Toggle]</col> <col=ff0000>HIDDEN</col> (" + changeReason + ")";
+                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", message, null);
+            }
+
+            // **Overlay notification** (only show if Overlay or Both is enabled)
+            if (mode == TerrainToggleConfig.NotificationMode.Overlay || mode == TerrainToggleConfig.NotificationMode.Both) {
+                overlay.updateOverlayMessage("Terrain: " + (terrainVisible ? "VISIBLE" : "HIDDEN") + " (" + changeReason + ")");
+            }
         }
     }
 
-    // === Hotkey handling ===
+
+
+
+    // ===== Shift + Right-Click Add/Remove Region =====
+    private int clickedRegionId = -1;
+
+    @Subscribe
+    public void onMenuEntryAdded(MenuEntryAdded event) {
+        // Only trigger when SHIFT key is pressed and the action is related to a ground tile (WALK)
+        if (!client.isKeyPressed(KeyCode.KC_SHIFT) || event.getType() != MenuAction.WALK.getId()) {
+            return;
+        }
+
+        // Check if the right-click menu option is enabled in the config
+        if (!config.enableRightClickRegion()) {
+            return;  // If the config is disabled, don't add the menu entry
+        }
+
+        // Get the region of the clicked tile
+        int regionId = client.getLocalPlayer().getWorldLocation().getRegionID();
+
+        // Check if the region is in the Show or Hide list
+        boolean isInHideList = hideRegions.contains(regionId);
+        boolean isInShowList = showRegions.contains(regionId);
+
+        // Retrieve the current menu entries to check if "Terrain Toggle" already exists
+        MenuEntry[] menuEntries = client.getMenuEntries();
+        boolean terrainToggleExists = false;
+
+        // Check if "Terrain Toggle" is already in the menu
+        for (MenuEntry entry : menuEntries) {
+            if ("Terrain Toggle".equals(entry.getOption())) {
+                terrainToggleExists = true;
+                break;
+            }
+        }
+
+        // If the "Terrain Toggle" menu entry doesn't exist, add it
+        if (!terrainToggleExists) {
+            // Create the "Terrain Toggle" menu entry (main entry)
+            MenuEntry terrainToggleEntry = client.createMenuEntry(-1)
+                    .setOption("Terrain Toggle")
+                    .setTarget("")
+                    .setType(MenuAction.RUNELITE);
+
+            // Create the submenu for "Terrain Toggle"
+            Menu terrainSubMenu = terrainToggleEntry.createSubMenu();
+
+            // Add Show List option to the submenu
+            terrainSubMenu.createMenuEntry(0)
+                    .setOption(isInShowList ? "Remove region from Show List" : "Add region to Show List")
+                    .setTarget("")
+                    .setType(MenuAction.RUNELITE)
+                    .onClick(e -> {
+                        if (isInShowList) {
+                            showRegions.remove(regionId);
+                            if (config.notificationMode() == TerrainToggleConfig.NotificationMode.Text ||
+                                    config.notificationMode() == TerrainToggleConfig.NotificationMode.Both) {
+                                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+                                        "<col=00FFFF>[Terrain Toggle]</col> Removed region from Show List: " + regionId, null);
+                            }
+                        } else {
+                            showRegions.add(regionId);
+                            if (config.notificationMode() == TerrainToggleConfig.NotificationMode.Text ||
+                                    config.notificationMode() == TerrainToggleConfig.NotificationMode.Both) {
+                                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+                                        "<col=00FFFF>[Terrain Toggle]</col> Added region to Show List: " + regionId, null);
+                            }
+                        }
+                        saveRegionListsToConfig(); // Save updated list to config
+                    });
+
+            // Add Hide List option to the submenu
+            terrainSubMenu.createMenuEntry(1)
+                    .setOption(isInHideList ? "Remove region from Hide List" : "Add region to Hide List")
+                    .setTarget("")
+                    .setType(MenuAction.RUNELITE)
+                    .onClick(e -> {
+                        if (isInHideList) {
+                            hideRegions.remove(regionId);
+                            if (config.notificationMode() == TerrainToggleConfig.NotificationMode.Text ||
+                                    config.notificationMode() == TerrainToggleConfig.NotificationMode.Both) {
+                                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+                                        "<col=00FFFF>[Terrain Toggle]</col> Removed region from Hide List: " + regionId, null);
+                            }
+                        } else {
+                            hideRegions.add(regionId);
+                            if (config.notificationMode() == TerrainToggleConfig.NotificationMode.Text ||
+                                    config.notificationMode() == TerrainToggleConfig.NotificationMode.Both) {
+                                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+                                        "<col=00FFFF>[Terrain Toggle]</col> Added region to Hide List: " + regionId, null);
+                            }
+                        }
+                        saveRegionListsToConfig(); // Save updated list to config
+                    });
+
+            // Append the created submenu to the menu
+            MenuEntry[] updatedMenuEntries = Arrays.copyOf(menuEntries, menuEntries.length + 1);
+            updatedMenuEntries[updatedMenuEntries.length - 1] = terrainToggleEntry;  // Add the Terrain Toggle entry
+
+            // Apply the updated menu entries
+            client.setMenuEntries(updatedMenuEntries);
+        }
+    }
+
+
+
+
+    @Subscribe
+    public void onMenuOptionClicked(MenuOptionClicked event) {
+        if (event.getMenuAction() != MenuAction.RUNELITE)
+            return;
+
+        String option = event.getMenuOption();
+        int regionId = client.getLocalPlayer().getWorldLocation().getRegionID();
+
+        // Notification mode from config
+        TerrainToggleConfig.NotificationMode mode = config.notificationMode();
+
+        // Handle submenu actions based on the selected option
+        if (option.equals("Add to Hide List")) {
+            hideRegions.add(regionId);
+            saveRegionListsToConfig();
+            // Send chat message based on notification mode
+            if (mode == TerrainToggleConfig.NotificationMode.Text || mode == TerrainToggleConfig.NotificationMode.Both) {
+                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+                        "<col=00FFFF>[Terrain Toggle]</col> Added region to Hide List: " + regionId, null);
+            }
+        } else if (option.equals("Remove from Hide List")) {
+            hideRegions.remove(regionId);
+            saveRegionListsToConfig();
+            // Send chat message based on notification mode
+            if (mode == TerrainToggleConfig.NotificationMode.Text || mode == TerrainToggleConfig.NotificationMode.Both) {
+                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+                        "<col=00FFFF>[Terrain Toggle]</col> Removed region from Hide List: " + regionId, null);
+            }
+        } else if (option.equals("Add to Show List")) {
+            showRegions.add(regionId);
+            saveRegionListsToConfig();
+            // Send chat message based on notification mode
+            if (mode == TerrainToggleConfig.NotificationMode.Text || mode == TerrainToggleConfig.NotificationMode.Both) {
+                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+                        "<col=00FFFF>[Terrain Toggle]</col> Added region to Show List: " + regionId, null);
+            }
+        } else if (option.equals("Remove from Show List")) {
+            showRegions.remove(regionId);
+            saveRegionListsToConfig();
+            // Send chat message based on notification mode
+            if (mode == TerrainToggleConfig.NotificationMode.Text || mode == TerrainToggleConfig.NotificationMode.Both) {
+                client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+                        "<col=00FFFF>[Terrain Toggle]</col> Removed region from Show List: " + regionId, null);
+            }
+        }
+    }
+
+
+
+
+    // ===== Hotkey handling =====
+    private String lastChangeReason = "";
+
     @Override
-    public void keyPressed(KeyEvent e)
-    {
-        if (config.toggleTerrainHotkey().matches(e))
-        {
+    public void keyPressed(KeyEvent e) {
+        // If hotkey functionality is disabled, exit early
+        if (!config.enableHotkey()) return;
+
+        // Check if the configured hotkey matches the key pressed
+        if (config.toggleTerrainHotkey().matches(e)) {
             consumeKeys = true;
             e.consume();
 
-            // Toggle terrain visibility
-            boolean newState = !config.enableTerrain();
-            configManager.setConfiguration(TerrainToggleConfig.GROUP, "enableTerrain", newState);
-            terrainVisible = newState;
-            log.info("Terrain visibility toggled via hotkey: {}", newState);
+            // Toggle the master terrain visibility (config setting)
+            boolean newTerrainVisibility = !config.enableTerrain();  // Flip the current setting
+
+            // Set the change reason to "Hotkey"
+            lastChangeReason = "Hotkey";
+
+            // Update the config with the new visibility setting (this will save the updated value)
+            configManager.setConfiguration(TerrainToggleConfig.GROUP, "enableTerrain", String.valueOf(newTerrainVisibility));
+
+            // Trigger the game state change to reflect the visibility change
+            client.setGameState(GameState.LOADING);  // Forces a refresh/update of the game state
         }
     }
 
+
+
     @Override
-    public void keyReleased(KeyEvent e)
-    {
-        if (config.toggleTerrainHotkey().matches(e))
-        {
+    public void keyReleased(KeyEvent e) {
+        if (consumeKeys) {
             consumeKeys = false;
             e.consume();
         }
     }
 
     @Override
-    public void keyTyped(KeyEvent e)
-    {
-        if (consumeKeys)
-        {
-            e.consume();
+    public void keyTyped(KeyEvent e) {
+        if (consumeKeys) e.consume();
+    }
+
+    // ===== Utility =====
+    private void loadRegionListsFromConfig() {
+        // Load the show/hide region lists from config
+        String showCsv = config.showRegions();
+        String hideCsv = config.hideRegions();
+
+        if (showCsv != null && !showCsv.isEmpty()) {
+            for (String part : showCsv.split(",")) {
+                try { showRegions.add(Integer.parseInt(part.trim())); }
+                catch (NumberFormatException ignored) {}
+            }
+        }
+
+        if (hideCsv != null && !hideCsv.isEmpty()) {
+            for (String part : hideCsv.split(",")) {
+                try { hideRegions.add(Integer.parseInt(part.trim())); }
+                catch (NumberFormatException ignored) {}
+            }
         }
     }
 
-    // === DrawCallbacks ===
-    @Override
-    public void drawScenePaint(Scene scene, SceneTilePaint paint, int plane, int tileX, int tileY)
-    {
-        if (terrainVisible && interceptedDrawCallbacks != null)
-            interceptedDrawCallbacks.drawScenePaint(scene, paint, plane, tileX, tileY);
+    public void updateRegionLists() {
+        reloadRegionLists();  // Reload region lists based on the updated configuration
     }
 
-    @Override
-    public void drawSceneTileModel(Scene scene, SceneTileModel model, int tileX, int tileY)
-    {
-        if (terrainVisible && interceptedDrawCallbacks != null)
-            interceptedDrawCallbacks.drawSceneTileModel(scene, model, tileX, tileY);
+
+    // Add this method to reload the region lists dynamically
+    private void reloadRegionLists() {
+        // Clear current lists
+        showRegions.clear();
+        hideRegions.clear();
+
+        // Load the show regions from the config
+        String showRegionsCsv = config.showRegions();
+        if (showRegionsCsv != null && !showRegionsCsv.isEmpty()) {
+            for (String regionId : showRegionsCsv.split(",")) {
+                try {
+                    showRegions.add(Integer.parseInt(regionId.trim()));
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+
+        // Load the hide regions from the config
+        String hideRegionsCsv = config.hideRegions();
+        if (hideRegionsCsv != null && !hideRegionsCsv.isEmpty()) {
+            for (String regionId : hideRegionsCsv.split(",")) {
+                try {
+                    hideRegions.add(Integer.parseInt(regionId.trim()));
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+
+        // Optional: Log the updated lists for debugging
+        log.info("Region lists reloaded: Show Regions = {} , Hide Regions = {}", showRegions, hideRegions);
     }
 
-    // === Required DrawCallbacks stubs ===
-    @Override public void drawScene(double cameraX, double cameraY, double cameraZ, double cameraPitch, double cameraYaw, int plane) { if (interceptedDrawCallbacks != null) interceptedDrawCallbacks.drawScene(cameraX, cameraY, cameraZ, cameraPitch, cameraYaw, plane); }
-    @Override public void postDrawScene() { if (interceptedDrawCallbacks != null) interceptedDrawCallbacks.postDrawScene(); }
-    @Override public void animate(Texture texture, int diff) { if (interceptedDrawCallbacks != null) interceptedDrawCallbacks.animate(texture, diff); }
-    @Override public void loadScene(Scene scene) { if (interceptedDrawCallbacks != null) interceptedDrawCallbacks.loadScene(scene); }
-    @Override public void swapScene(Scene scene) { if (interceptedDrawCallbacks != null) interceptedDrawCallbacks.swapScene(scene); }
-    @Override public boolean tileInFrustum(Scene scene, float pitchSin, float pitchCos, float yawSin, float yawCos, int cameraX, int cameraY, int cameraZ, int plane, int msx, int msy) { return interceptedDrawCallbacks == null || interceptedDrawCallbacks.tileInFrustum(scene, pitchSin, pitchCos, yawSin, yawCos, cameraX, cameraY, cameraZ, plane, msx, msy); }
-    @Override public void draw(int overlayColor) { if (interceptedDrawCallbacks != null) interceptedDrawCallbacks.draw(overlayColor); }
-    @Override public void draw(Projection projection, Scene scene, Renderable renderable, int orientation, int x, int y, int z, long hash) { if (interceptedDrawCallbacks != null) interceptedDrawCallbacks.draw(projection, scene, renderable, orientation, x, y, z, hash); }
+
+
+
+
+    private void saveRegionListsToConfig() {
+        StringBuilder showSb = new StringBuilder();
+        StringBuilder hideSb = new StringBuilder();
+
+        for (int r : showRegions) {
+            if (showSb.length() > 0) showSb.append(",");
+            showSb.append(r);
+        }
+
+        for (int r : hideRegions) {
+            if (hideSb.length() > 0) hideSb.append(",");
+            hideSb.append(r);
+        }
+
+        configManager.setConfiguration(TerrainToggleConfig.GROUP, "showRegions", showSb.toString());
+        configManager.setConfiguration(TerrainToggleConfig.GROUP, "hideRegions", hideSb.toString());
+    }
+
+    // New getter for config to allow access from Overlay and other classes
+    public TerrainToggleConfig getConfig() {
+        return config;
+    }
+
+    // New getter for terrain visibility
+    public boolean isTerrainVisible() {
+        return terrainVisible;
+    }
+
+    // New getter for hotkey enabled status
+    public boolean isHotkeyEnabled() {
+        return config.enableHotkey();
+    }
+
+    // New getter for region toggle enabled status
+    public boolean isRegionToggleEnabled() {
+        return config.enableRegionToggle();
+    }
+
+    // New getter for current region ID
+    public int getCurrentRegionId() {
+        if (client.getLocalPlayer() == null) {
+            return -1;  // Return -1 if the local player is not available
+        }
+        return client.getLocalPlayer().getWorldLocation().getRegionID();  // Get the current region ID of the player
+    }
+
+    // New method to check if player is in a selected region
+    public boolean isInSelectedRegion() {
+        if (client.getLocalPlayer() == null) {
+            return false;  // Return false if the local player is not available
+        }
+        int currentRegion = getCurrentRegionId();  // Get the current region ID
+        return showRegions.contains(currentRegion) || hideRegions.contains(currentRegion);  // Check if the current region is in the selected regions list
+    }
 }
