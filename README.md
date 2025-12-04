@@ -12,6 +12,8 @@
 <li>Region automation
 <ul>
 <li>Hide/Show selected regions</li>
+<li>Remembers instances and raid rooms</li>
+<li>Shift+Right click menu option to add current region to hide/show list</li>
 </ul>
 </li>
 </ul>

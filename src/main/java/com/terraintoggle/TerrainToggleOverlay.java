@@ -58,7 +58,7 @@ public class TerrainToggleOverlay extends Overlay {
         panelComponent.getChildren().add(createLineComponent("Region Mode", plugin.isRegionToggleEnabled() ? "ON" : "OFF", plugin.isRegionToggleEnabled()));
 
         // === Current Region ID ===
-        int currentRegion = plugin.getCurrentRegionId();
+        int currentRegion = plugin.getCurrentAreaId();
         if (currentRegion != -1 && plugin.getConfig().showRegionInOverlay()) {
             panelComponent.getChildren().add(createLineComponent("Current Region", String.valueOf(currentRegion), true));
         }
